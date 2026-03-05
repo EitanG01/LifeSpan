@@ -1,0 +1,224 @@
+---
+title: "GAM analysis"
+author: "Eitan Gelfand"
+date: "2025-03-12"
+output: html_document
+---
+# script prep
+```{r}
+df <- read.csv("full_data_slope.csv")
+library(mgcv)   # For GAM
+library(dplyr)  # For convenient data manipulation (e.g., subset)
+library(ggplot2) # For plotting (optional, you can also use mgcv’s plot)
+
+```
+
+#subset the data
+```{r}
+# Subset for each Race x bias combination
+df_asian_biasm <- subset(df, ExperimentName == "Asian" & Regression == "biasm")
+df_asian_biasp <- subset(df, ExperimentName == "Asian" & Regression == "biasp")
+df_cauc_biasm  <- subset(df, ExperimentName == "Caucasian" & Regression == "biasm")
+df_cauc_biasp  <- subset(df, ExperimentName == "Caucasian" & Regression == "biasp")
+
+```
+
+#GAM Fit
+```{r}
+m_asian_biasm <- gam(slope ~ s(Age, k = 8),
+                     data = df_asian_biasm,
+                     method = "REML")
+
+m_asian_biasp <- gam(slope ~ s(Age, k = 8),
+                     data = df_asian_biasp,
+                     method = "REML")
+
+m_cauc_biasm  <- gam(slope ~ s(Age, k = 8),
+                     data = df_cauc_biasm,
+                     method = "REML")
+
+m_cauc_biasp  <- gam(slope ~ s(Age, k = 8),
+                     data = df_cauc_biasp,
+                     method = "REML")
+
+```
+#GAM run check
+```{r}
+# Summaries
+summary(m_asian_biasm)
+summary(m_asian_biasp)
+summary(m_cauc_biasm)
+summary(m_cauc_biasp)
+
+# Diagnostic checks
+gam.check(m_asian_biasm)
+gam.check(m_asian_biasp)
+gam.check(m_cauc_biasm)
+gam.check(m_cauc_biasp)
+```
+#mgvs plot
+```{r}
+plot(m_asian_biasm, shade = TRUE, pages = 1, main = "Asian x biasm")
+png("gam_asian_biasm.png", width = 800, height = 600)
+plot(m_asian_biasp, shade = TRUE, pages = 1, main = "Asian x biasp")
+plot(m_cauc_biasm, shade = TRUE, pages = 1, main = "Caucasian x biasm")
+plot(m_cauc_biasp, shade = TRUE, pages = 1, main = "Caucasian x biasp")
+
+png("gam_all_groups.png", width = 1600, height = 1200)
+par(mfrow = c(2,2))  # Arrange plots in 2x2 layout
+plot(m_asian_biasm, shade = TRUE, main = "Asian x biasm",ylab ="slope")
+plot(m_asian_biasp, shade = TRUE, main = "Asian x biasp",ylab ="slope")
+plot(m_cauc_biasm, shade = TRUE, main = "Caucasian x biasm",ylab ="slope")
+plot(m_cauc_biasp, shade = TRUE, main = "Caucasian x biasp",ylab ="slope")
+dev.off()
+```
+#expirments
+```{r}
+df_asian <- subset(df, ExperimentName == "Asian")
+df_cauc  <- subset(df, ExperimentName == "Caucasian")
+
+m_asian <- gam(slope ~ s(Age, k = 8),
+                     data = df_asian,
+                     method = "REML")
+
+m_cauc <- gam(slope ~ s(Age, k = 8),
+                     data = df_cauc,
+                     method = "REML")
+
+summary(m_asian)
+summary(m_cauc)
+
+png("gam_asian_cauc.png", width = 1200, height = 600)
+par(mfrow = c(1, 2))  # 1 row, 2 columns
+plot(m_asian, shade = TRUE, main = "Asian", ylab = "Slope")
+plot(m_cauc, shade = TRUE, main = "Caucasian", ylab = "Slope")
+dev.off()
+
+```
+
+#expirments
+```{r}
+df_biasm <- subset(df, Regression == "biasm")
+df_biasp  <- subset(df, Regression == "biasp")
+
+m_biasm <- gam(slope ~ s(Age, k = 8),
+                     data = df_biasm,
+                     method = "REML")
+
+m_biasp <- gam(slope ~ s(Age, k = 8),
+                     data = df_biasp,
+                     method = "REML")
+
+summary(m_biasm)
+summary(m_biasp)
+
+png("gam_biasm_biasp.png", width = 1200, height = 600)
+par(mfrow = c(1, 2))  # 1 row, 2 columns
+plot(m_biasm, shade = TRUE, main = "biasm", ylab = "Slope")
+plot(m_biasp, shade = TRUE, main = "biasp", ylab = "Slope")
+dev.off()
+
+```
+#AIC compare
+```{r}
+# 1. Linear
+linear_mod <- lm(slope ~ Age, data = df)
+
+# 2. Quadratic
+quad_mod   <- lm(slope ~ Age + I(Age^2), data = df)
+
+# 3. GAM with ML for fair comparison
+gam_mod_ml <- gam(slope ~ s(Age, k=8), data=df, method="ML")
+
+# Compare AIC
+AIC(linear_mod, quad_mod, gam_mod_ml)
+
+```
+
+#sag table
+```{r}
+cat("==== Asian + biasm ====\n")
+get_minimal_info(m_asian_biasm)
+
+cat("==== Asian + biasp ====\n")
+get_minimal_info(m_asian_biasp)
+
+cat("==== Caucasian + biasm ====\n")
+get_minimal_info(m_cauc_biasm)
+
+cat("==== Caucasian + biasp ====\n")
+get_minimal_info(m_cauc_biasp)
+
+
+get_minimal_info <- function(model) {
+  sm <- summary(model)
+  
+  # More nuanced p-value labeling
+  p_label <- function(p) {
+    if (p < 1e-4) {
+      "< 1e-4"
+    } else if (p < 1e-4) {
+      "< 0.0001"        # catches values that would round to 0.0000
+    } else {
+      paste(round(p, 4))
+    }
+  }
+  
+  intercept_p <- sm$p.table[1, 4]  # parametric (intercept) p-value
+  smooth_p    <- sm$s.table[1, 4]  # smooth term p-value
+  edf         <- sm$s.table[1, 1]  # effective degrees of freedom
+  r2          <- sm$r.sq
+  dev_expl    <- sm$dev.expl
+  
+  cat("Intercept p-value:", p_label(intercept_p), "\n")
+  cat("Smooth p-value:   ", p_label(smooth_p), "\n")
+  cat("edf:              ", round(edf, 2), "\n")
+  cat("R-sq (adj):       ", round(r2, 3), "\n")
+  cat("Deviance expl.:   ", round(dev_expl * 100, 1), "%\n\n")
+}
+
+
+```
+
+#sag table
+```{r}
+# Define the helper function first
+get_minimal_info <- function(model) {
+  sm <- summary(model)
+  
+  # p-value labeling: if p is extremely small, print "< 1e-4", else round to 4 decimals
+  p_label <- function(p) {
+    if (p < 1e-4) {
+      "< 1e-4"
+    } else {
+      paste(round(p, 4))
+    }
+  }
+  
+  intercept_p <- sm$p.table[1, 4]  # parametric (intercept) p-value
+  smooth_p    <- sm$s.table[1, 4]   # smooth term p-value
+  edf         <- sm$s.table[1, 1]   # effective degrees of freedom
+  r2          <- sm$r.sq           # adjusted R-squared
+  dev_expl    <- sm$dev.expl       # deviance explained
+  
+  cat("Intercept p-value:", p_label(intercept_p), "\n")
+  cat("Smooth p-value:   ", p_label(smooth_p), "\n")
+  cat("edf:              ", round(edf, 2), "\n")
+  cat("R-sq (adj):       ", round(r2, 3), "\n")
+  cat("Deviance expl.:   ", round(dev_expl * 100, 1), "%\n\n")
+}
+
+# Now call the function for each model
+cat("==== Asian + biasm ====\n")
+get_minimal_info(m_asian_biasm)
+
+cat("==== Asian + biasp ====\n")
+get_minimal_info(m_asian_biasp)
+
+cat("==== Caucasian + biasm ====\n")
+get_minimal_info(m_cauc_biasm)
+
+cat("==== Caucasian + biasp ====\n")
+get_minimal_info(m_cauc_biasp)
+
+```

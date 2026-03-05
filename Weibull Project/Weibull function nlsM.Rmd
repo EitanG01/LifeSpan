@@ -1,0 +1,368 @@
+---
+title: "Psychometric Curve Fitting"
+output: html_document
+---
+
+## Analysis Summary
+
+- Purpose: fit Weibull psychometric functions across lifespan conditions.
+- Input metric: ACC by Range from `life_span_updating.csv`.
+- Key parameters: Range, ExperimentName (race), Regression, Group, Subject.
+- Output plots: Weibull trajectory figures saved to `output/plots/`.
+- Output data files: `data/full_data_with_predictions.csv` and `data/full_results.csv`.
+- Output console: model convergence status, parameter estimates (lambda, k, JND, PSE, slope), R² values.
+
+# Setup
+```{r setup, warning=FALSE}
+# Load packages and shared resources
+library(tidyverse)
+library(minpack.lm) # for nlsLM
+
+# Configure plot text rendering
+library(showtext) 
+source("R/paths.R")
+source("R/theme_pub.R")
+font_add("Times New Roman", regular = "times.ttf")
+showtext_opts(dpi = 300)
+showtext_auto()
+
+# Read and prepare input data
+df <- read.csv(data_path("life_span_updating.csv"))
+
+
+# Remove excluded conditions and bound ACC away from 0/1 for stable fitting
+data <- filter(df, Range != 0, !Subject %in% c(229, 241))
+data$ACC <- pmin(pmax(data$ACC, 1e-4), 1 - 1e-4)
+
+fit_curve <- function(.data) {
+  nlsLM(
+    ACC ~ 1 - exp(-(Range / lambda)^k),
+    data    = .data,
+    start   = list(lambda = 20, k = 1.0),
+    lower   = c(lambda = 1e-5, k = 1e-5),
+    control = nls.lm.control(
+      maxiter = 500  # Increase iterations if needed
+    )
+  )
+}
+
+
+extract_estimates <- function(model) {
+
+  pars    <- coef(model)
+  lambda  <- pars["lambda"]
+  k       <- pars["k"]
+
+  j25 <- lambda * (-log(1 - 0.25))^(1 / k)
+  j50 <- lambda * (-log(1 - 0.50))^(1 / k)
+  j75 <- lambda * (-log(1 - 0.75))^(1 / k)
+  JND <- (j75 - j25) / 2
+  PSE <- j50
+  slope <- (k / (4 * lambda)) * (log(4))^((k - 1) / k)
+
+  # Return Weibull-derived indices in tidy format
+  tibble::tibble(
+    lambda = lambda,
+    k      = k,
+    j25    = j25,
+    j75    = j75,
+    JND    = JND,
+    PSE    = PSE,
+    slope = slope
+  )
+}
+
+add_predictions <- function(model, grid) {
+  # This function returns predictions for grid according to the model
+  grid$Y_hat <- predict(model, newdata = grid)
+  grid
+}
+
+
+```
+# Fit
+```{r data}
+# Fit Weibull model per Subject × ExperimentName × Group × Regression
+data_fits <- data |> 
+  group_by(ExperimentName, Subject,Group,Regression) |> 
+  summarise(
+    FIT = list(fit_curve(.data = pick(everything())))
+  ) |> 
+  ungroup()
+
+# Extract Weibull indices from fitted models
+data_params <- data_fits |> 
+  mutate(
+    map(FIT, extract_estimates) |> bind_rows()
+  ) |> 
+  select(-FIT)
+```
+
+Add predictions:
+
+## Prediction Grid and Joined Output
+
+```{r warning=FALSE}
+grid <- data.frame(Range = c(15, 21, 27, 33, 39, 45))
+
+# Generate model predictions and join observed data
+data_predictions <- data_fits |> 
+  group_by(ExperimentName,Subject,Group,Regression) |> 
+  reframe(
+    add_predictions(FIT[[1]], grid))|> 
+  ungroup() |> 
+  left_join(data, by = c("ExperimentName", "Subject", "Range","Group","Regression"))%>%
+  # Set factor order for plotting
+  mutate(
+    Group = factor(Group,levels = c("Children","Young Adults", "Middle-Aged", "Elderly")),
+    ExperimentName = factor(ExperimentName, levels = c("Caucasian", "Asian"))
+  )
+```
+
+## Export Model Outputs
+
+Add R2
+
+```{r}
+data_params2 <- data_predictions |> 
+  group_by(ExperimentName, Subject,Group,Regression) |>
+  
+  summarise(
+    Rsq = cor(ACC, Y_hat) ^ 2
+  ) |> 
+  ungroup() |> 
+  left_join(data_params, by = join_by(ExperimentName, Subject,Group,Regression))
+
+# Save analysis outputs used by downstream scripts
+write.csv(data_predictions, data_path("full_data_with_predictions.csv"))
+write.csv(data_params2, data_path("full_results.csv"))
+```
+
+## Main Weibull Plot
+
+# Weibull plot by race rows and age-group columns (colored by regression)
+```{r}
+
+p <- ggplot(data_predictions, aes(x = Range)) +
+  facet_grid(rows = vars(ExperimentName), 
+             cols = vars(Group),
+             labeller = labeller(
+               ExperimentName = c("Asian" = "Other-Race", "Caucasian" = "Own-Race")
+             )
+             ) +
+  stat_summary(aes(y = Y_hat, colour = Regression),
+               geom = "line", linewidth = 1.2) +
+  geom_hline(yintercept = 0.5,linetype = "dashed", linewidth = 0.5, alpha = 0.5) +
+  scale_x_continuous(limits = c(15, 45),
+                     breaks = c(15, 21, 27, 33, 39, 45)) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(y = "Accuracy",
+       x = "Difference in morph levels") +
+    theme_pub() +
+  scale_colour_manual(
+  values = c(biasp = "#7FB3D5", biasm = "#F08080"),
+  labels = c(biasp = "Bias+", biasm = "Bias-")
+    )
+
+ggsave(filename = plot_path("Weibull_all_groups_lifespan.png"),
+       plot  = p,
+       width = 10, height = 6, dpi = 300)
+```
+
+## Subject-Level Weibull Plots
+
+```{r}
+output_dir <- PLOTS_DIR
+
+subjects <- unique(data_predictions$Subject)
+
+for (subj in subjects) {
+  
+  # Filter to one subject
+  dp_subj <- data_predictions %>%
+    filter(Subject == subj)
+  
+  # Build subject-specific plot
+  p_subj <- ggplot(dp_subj, aes(x = Range)) +
+    facet_grid(
+      rows = vars(ExperimentName),
+      cols = vars(Group),
+      labeller = labeller(
+        ExperimentName = c("Asian" = "Other-Race",
+                           "Caucasian" = "Own-Race")
+      )
+    ) +
+    stat_summary(aes(y = Y_hat, colour = Regression),
+                 geom    = "line",
+                 linewidth = 1.2) +
+    geom_hline(yintercept = 0.5,
+               linetype   = "dashed",
+               linewidth  = 0.5,
+               alpha      = 0.5) +
+    scale_x_continuous(limits = c(15, 45),
+                       breaks = c(15, 21, 27, 33, 39, 45)) +
+    scale_y_continuous(limits = c(0, 1)) +
+    labs(
+      y = "Accuracy",
+      x = "Difference in morph levels",
+      title = paste("Subject", subj)
+    ) +
+    theme_pub() +
+    scale_colour_manual(
+      values = c(biasp = "#7FB3D5", biasm = "#F08080"),
+      labels = c(biasp = "Bias+", biasm = "Bias-")
+    )
+  
+  # Save subject-specific plot
+  ggsave(
+    filename = file.path(output_dir,
+                         paste0("Subject_", subj, ".png")),
+    plot   = p_subj,
+    width  = 4, height = 6, dpi = 300
+  )
+}
+```
+
+
+## Illustration Plots by Group and Race
+```{r}
+output_dir <- PLOTS_DIR
+
+unique_groups      <- unique(data_predictions$Group)
+unique_experiments <- unique(data_predictions$ExperimentName)
+
+for (g in unique_groups) {
+  for (e in unique_experiments) {
+
+    subset_df <- data_predictions %>%
+    filter(Group == g, ExperimentName == e)
+    if (nrow(subset_df) == 0) next
+
+    p <- ggplot(subset_df, aes(x = Range, y = Y_hat, color = Regression)) +
+      geom_line(aes(group = interaction(Subject, Regression)), alpha = 0.2) +
+      stat_summary(aes(group = Regression), fun = mean, geom = "line", linewidth = 1) +
+      geom_hline(yintercept = 0.5, linetype = "dashed", linewidth = 0.5) +
+      scale_x_continuous(limits = c(15, 45),
+                     breaks = c(15, 21, 27, 33, 39, 45)) +
+      scale_y_continuous(limits = c(0, 1)) +
+      coord_fixed(ratio = 50) +
+      scale_color_manual(
+        values = c(biasm = "#F08080", biasp = "#7FB3D5"),
+        labels = c(biasp = "Bias+", biasm = "Bias-"),
+        name   = "Regression"
+      ) +
+      labs(
+       # title = paste(g, "-", e),
+        x     = "Difference in morph levels",
+        y     = "Accuracy"
+      ) +
+      theme_pub()
+
+   filename <- file.path(output_dir, paste0("illustration_option_", g, "_", e, ".png"))
+    ggsave(filename,
+           plot = p, 
+           width = 3,
+           height = 4, 
+           dpi = 300
+           )
+    }
+  }
+```
+
+
+
+
+
+## Single-Condition Weibull Plots
+```{r}
+# 1) Get the unique values of your grouping columns
+unique_groups       <- unique(data_predictions$Group)
+unique_Regressions <- unique(data_predictions$Regression)
+unique_experiments <- unique(data_predictions$ExperimentName)
+
+# 2) Loop over all combinations
+for (g in unique_groups) {
+  for (r in unique_Regressions) {
+    for (e in unique_experiments) {
+      
+      # -- Subset the data for this combination --
+      subset_df <- data_predictions %>%
+        filter(Group == g, 
+               Regression == r, 
+               ExperimentName == e)
+      
+      # If subset_df has no rows, skip
+      if(nrow(subset_df) == 0) next
+      
+      # -- Build the plot --
+      p <- ggplot(subset_df, aes(x = Range)) +
+        geom_line(aes(y = Y_hat, group = Subject), alpha = 0.15) +
+        geom_point(aes(y = ACC), alpha = 0.1, shape = 20) +
+        stat_summary(aes(y = Y_hat), geom = "line", color = "red", linewidth = 1) +
+        geom_hline(yintercept = 0.5, linetype = "dashed", linewidth = 0.5) +
+        coord_cartesian(ylim = c(0, 1)) +
+        coord_fixed(ratio = 50) +
+        theme_pub() +
+        labs(
+          title = paste("Group:", g, "- Regression:", r, "- Experiment:", e),
+          x = "Range",
+          y = "ACC / Y_hat"
+        )
+      
+      # -- Save the plot --
+      filename <- plot_path(paste0("plot_", g, "_", r, "_", e, ".png"))
+      ggsave(filename = filename, plot = p, width = 8, height = 6)
+    }
+  }
+}
+
+```
+
+## Weibull Plot Colored by Race (Regression Facets) 
+```{r}
+
+data_predictions$Regression <- factor(
+  data_predictions$Regression,
+  levels = c("biasm", "biasp")  # Bias+ on top, Bias− on bottom
+)
+
+p <- ggplot(data_predictions, aes(x = Range)) +
+  facet_grid(
+    rows = vars(Regression), 
+    cols = vars(Group),
+    labeller = labeller(
+      Regression = c("biasm" = "Bias−", "biasp" = "Bias+")
+    )
+  ) +
+  stat_summary(
+    aes(y = Y_hat, colour = ExperimentName),
+    geom = "line", linewidth = 1.2
+  ) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", linewidth = 0.5, alpha = 0.5) +
+  scale_x_continuous(
+    limits = c(15, 45),
+    breaks = c(15, 21, 27, 33, 39, 45)
+  ) +
+  scale_y_continuous(limits = c(0, 1)) +
+  labs(
+    y = "Accuracy",
+    x = "Difference in morph levels"
+  ) +
+  theme_pub() +
+  scale_colour_manual(
+    values = c("Caucasian" = "#A6D8C3", "Asian" = "#F6B48F"),
+    labels = c(Caucasian = "Own-Race", Asian = "Other-Race")
+  )
+
+ggsave(
+  filename = plot_path("Weibull_all_groups_lifespan_switched.png"),
+  plot = p,
+  width = 10, height = 6, dpi = 300
+)
+
+
+
+```
+
+
+
