@@ -2,7 +2,7 @@
 # Shared publication-style ggplot theme used across analysis scripts.
 
 # Returns a consistent black-and-white base theme with project defaults.
-theme_pub <- function(base_size = 16, base_family = "Times New Roman") {
+theme_pub <- function(base_size = 14, base_family = "Times New Roman") {
   theme_bw(base_size = base_size, base_family = base_family) +
     theme(
       axis.text        = element_text(size = base_size - 2),
